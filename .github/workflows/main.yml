@@ -1,0 +1,116 @@
+name: Build AIO UI APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["**"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK
+        run: |
+          yes | sdkmanager --licenses || true
+          sdkmanager "platform-tools"
+          sdkmanager "platforms;android-34"
+          sdkmanager "build-tools;34.0.0"
+
+      - name: Extract ZIP
+        run: |
+          mkdir -p project
+
+          ZIP=$(find . -maxdepth 3 -name "AIO_UI_FIXED.zip" | head -n 1)
+
+          if [ -n "$ZIP" ]; then
+            unzip -oq "$ZIP" -d project
+          fi
+
+      - name: Find Android project
+        run: |
+          ROOT=$(find . -type f \
+            -path "*/app/build.gradle.kts" \
+            -not -path "*/build/*" \
+            | head -n 1)
+
+          if [ -z "$ROOT" ]; then
+            echo "ERROR: app/build.gradle.kts not found"
+            find . -maxdepth 4 -type f
+            exit 1
+          fi
+
+          ROOT=$(dirname "$(dirname "$ROOT")")
+          ROOT=$(realpath "$ROOT")
+
+          echo "PROJECT_ROOT=$ROOT" >> "$GITHUB_ENV"
+          echo "Found: $ROOT"
+
+      - name: Configure project
+        run: |
+          cd "$PROJECT_ROOT"
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = "AIOUI"
+          include(":app")
+          EOF
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Build APK
+        id: build
+        run: |
+          cd "$PROJECT_ROOT"
+          set -o pipefail
+          gradle --no-daemon --stacktrace \
+            :app:assembleDebug 2>&1 | tee build.log
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AIO-UI-Build-Log
+          path: ${{ env.PROJECT_ROOT }}/build.log
+          if-no-files-found: warn
+
+      - name: Upload APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AIO-UI-APK
+          path: ${{ env.PROJECT_ROOT }}/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
