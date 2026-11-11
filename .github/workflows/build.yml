@@ -1,0 +1,176 @@
+name: AIO UI - Debug Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["**"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create diagnostics
+        run: mkdir -p diagnostics
+
+      - name: Setup Java
+        id: java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        id: android
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK
+        id: sdk
+        shell: bash
+        run: |
+          set -o pipefail
+          (
+            yes | sdkmanager --licenses || true
+            sdkmanager "platform-tools"
+            sdkmanager "platforms;android-34"
+            sdkmanager "build-tools;34.0.0"
+          ) 2>&1 | tee diagnostics/sdk.log
+
+      - name: Extract and locate project
+        id: locate
+        shell: bash
+        run: |
+          set -o pipefail
+
+          (
+            mkdir -p _extracted
+
+            ZIP=$(find . -maxdepth 4 -type f \
+              -iname "*.zip" \
+              -not -path "./.git/*" | head -n 1)
+
+            if [ -n "$ZIP" ]; then
+              echo "Extracting: $ZIP"
+              unzip -oq "$ZIP" -d _extracted
+            fi
+
+            APP=$(find . -type f \
+              -path "*/app/build.gradle.kts" \
+              -not -path "*/build/*" \
+              -not -path "*/.gradle/*" | head -n 1)
+
+            if [ -z "$APP" ]; then
+              echo "ERROR: Android module not found"
+              find . -maxdepth 5 -type f
+              exit 1
+            fi
+
+            ROOT=$(dirname "$(dirname "$APP")")
+            ROOT=$(realpath "$ROOT")
+
+            echo "$ROOT" > diagnostics/project-root.txt
+            echo "Project root: $ROOT"
+
+            if [ ! -f "$ROOT/build.gradle.kts" ]; then
+              echo "ERROR: Root build.gradle.kts missing"
+              exit 1
+            fi
+
+            if [ ! -s "$ROOT/settings.gradle.kts" ]; then
+              cat > "$ROOT/settings.gradle.kts" <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "AIOUI"
+          include(":app")
+          EOF
+            fi
+
+            echo "PROJECT_ROOT=$ROOT" >> "$GITHUB_ENV"
+
+          ) 2>&1 | tee diagnostics/project.log
+
+      - name: Setup Gradle
+        id: gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Show environment
+        id: environment
+        shell: bash
+        run: |
+          (
+            java -version
+            gradle --version
+            echo "ANDROID_HOME=$ANDROID_HOME"
+            echo "PROJECT_ROOT=$PROJECT_ROOT"
+            cat "$PROJECT_ROOT/settings.gradle.kts"
+            cat "$PROJECT_ROOT/build.gradle.kts"
+            cat "$PROJECT_ROOT/app/build.gradle.kts"
+          ) 2>&1 | tee diagnostics/environment.log
+
+      - name: Build APK
+        id: build
+        shell: bash
+        run: |
+          set -o pipefail
+
+          cd "$PROJECT_ROOT"
+
+          gradle --no-daemon \
+            --stacktrace \
+            --info \
+            --console=plain \
+            --warning-mode all \
+            :app:assembleDebug \
+            2>&1 | tee "$GITHUB_WORKSPACE/diagnostics/build.log"
+
+      - name: Show error details
+        if: always()
+        shell: bash
+        run: |
+          echo "========== BUILD SUMMARY =========="
+
+          for FILE in diagnostics/*.log; do
+            if [ -f "$FILE" ]; then
+              echo ""
+              echo "========== $FILE =========="
+              tail -n 100 "$FILE"
+            fi
+          done
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AIO-UI-FULL-DIAGNOSTICS
+          path: diagnostics/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AIO-UI-APK
+          path: ${{ env.PROJECT_ROOT }}/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
