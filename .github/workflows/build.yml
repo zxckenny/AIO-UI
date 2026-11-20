@@ -1,0 +1,62 @@
+name: Build AIO UI APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Find project (folder or ZIP)
+        id: project
+        run: |
+          set -euo pipefail
+          find_app() {
+            find "$1" -type f -path '*/app/build.gradle.kts' \
+              -not -path '*/.git/*' -not -path '*/build/*' -print -quit
+          }
+          APP="$(find_app "$GITHUB_WORKSPACE")"
+          if [ -z "$APP" ]; then
+            ZIP="$(find "$GITHUB_WORKSPACE" -maxdepth 3 -type f -iname '*.zip' -print -quit)"
+            if [ -n "$ZIP" ]; then
+              echo "Extracting $ZIP"
+              mkdir -p "$RUNNER_TEMP/proj"
+              unzip -oq "$ZIP" -d "$RUNNER_TEMP/proj"
+              APP="$(find_app "$RUNNER_TEMP/proj")"
+            fi
+          fi
+          if [ -z "$APP" ]; then
+            echo "ERROR: app/build.gradle.kts not found"
+            find "$GITHUB_WORKSPACE" -maxdepth 4 -type f | head -100
+            exit 1
+          fi
+          ROOT="$(realpath "$(dirname "$(dirname "$APP")")")"
+          test -f "$ROOT/app/src/main/AndroidManifest.xml"
+          echo "Project root: $ROOT"
+          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Gradle 8.7
+        uses: gradle/ac
